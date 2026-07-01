@@ -77,6 +77,101 @@ def recommend_tier(hours_per_day: float, interruptible: bool, reserved_discount:
     return "on_demand"
 
 
+# Per-GPU-type spot interruption rate (per-hour eviction chance) — 2026 snapshot.
+# Scarcer/pricier accelerators get reclaimed more often, which erodes the spot
+# discount through rework. Falls back to a moderate 5% for unknown types.
+SPOT_INTERRUPT_RATE = {
+    "H100": 0.06, "H200": 0.09, "B200": 0.12,
+    "A100": 0.04, "MI300X": 0.05, "A10G": 0.02, "L4": 0.015,
+}
+
+
+def recommend_tier_v2(
+    hours_per_day: float,
+    days_per_month: float,
+    interruptible: bool,
+    gpu_type: str,
+    on_demand_hr: float,
+    spot_hr: float,
+    reserved_1yr_hr: float,
+    reserved_3yr_hr: float,
+    num_gpus: int = 1,
+    horizon_months: int = 12,
+) -> dict:
+    """Your-Turn #1: cost-driven tier choice that weighs interruption rate and 3yr-vs-1yr.
+
+    Unlike the simple duty-cycle rule, this prices out *every* eligible tier for the
+    real monthly gpu-hours and picks the cheapest, subject to policy constraints:
+
+      - 'spot' is only eligible for interruptible jobs, and its effective cost is
+        inflated by the per-GPU-type interruption rate (rework), so a flaky H200/B200
+        may lose to reserved even though the sticker spot rate is lower.
+      - reserved 3yr is only allowed when the commitment horizon can amortize it
+        (>= 24 months); otherwise 1yr competes. Both must clear break-even utilization.
+
+    Returns the winning tier plus the full priced comparison for the report.
+    """
+    gpu_hours = max(0.0, hours_per_day) * max(0.0, days_per_month) * max(1, num_gpus)
+    duty = max(0.0, hours_per_day) / 24.0
+
+    candidates = {"on_demand": gpu_hours * on_demand_hr}
+
+    if interruptible:
+        rate = SPOT_INTERRUPT_RATE.get(gpu_type, 0.05)
+        sim = spot_checkpoint_cost(gpu_hours, spot_hr, on_demand_hr, interrupt_rate=rate)
+        candidates["spot"] = sim["spot_cost"]
+
+    # Reserved only makes sense above break-even (else you pay for idle capacity).
+    if duty >= break_even_utilization(1.0 - reserved_1yr_hr / on_demand_hr):
+        candidates["reserved_1yr"] = gpu_hours * reserved_1yr_hr
+    if horizon_months >= 24 and duty >= break_even_utilization(1.0 - reserved_3yr_hr / on_demand_hr):
+        candidates["reserved_3yr"] = gpu_hours * reserved_3yr_hr
+
+    best = min(candidates, key=candidates.get)
+    # Collapse the two reserved variants to a single 'reserved' label for M3 compatibility.
+    tier = "reserved" if best.startswith("reserved") else best
+    return {
+        "tier": tier,
+        "reserved_term": best if best.startswith("reserved") else None,
+        "monthly_cost": round(candidates[best], 2),
+        "on_demand_cost": round(candidates["on_demand"], 2),
+        "priced": {k: round(v, 2) for k, v in candidates.items()},
+    }
+
+
+def cache_is_worth_it(
+    cached_in: int,
+    reads: int = 1,
+    write_surcharge: float = 0.25,
+    price_in_per_m: float = 3.0,
+    storage_cost_per_m_hr: float = 0.0,
+    stored_hours: float = 0.0,
+    cache_discount: float = 0.10,
+) -> bool:
+    """Your-Turn #3: does prompt caching actually pay for this prompt?
+
+    Caching is not free: some providers surcharge the cache *write* (Anthropic ~+25%
+    on first write) and/or charge *storage* per stored-token-hour (Gemini). It only
+    wins once the cached tokens are re-read enough times to beat those costs.
+
+    Modeled per 1 cached token, all relative to full input price = 1.0:
+      - naive (no cache) over `reads` reads:            reads * 1.0
+      - cached: one write (1 + write_surcharge) + reads * cache_discount + storage
+    `storage_cost_per_m_hr` is a $/1M-token-hour storage rate, normalized against the
+    input price (`price_in_per_m`) so it lands on the same 1.0-per-input-token scale.
+    Returns True when the cached path is cheaper.
+    """
+    if cached_in <= 0 or reads <= 0:
+        return False
+    naive = reads * 1.0
+    write = 1.0 + write_surcharge
+    read = reads * cache_discount
+    # Storage per token per hour, expressed as a fraction of the per-token input price.
+    storage_per_tok = (storage_cost_per_m_hr * stored_hours) / price_in_per_m if price_in_per_m > 0 else 0.0
+    cached_cost = write + read + storage_per_tok
+    return cached_cost < naive
+
+
 def spot_checkpoint_cost(
     job_hours: float,
     spot_hr: float,
