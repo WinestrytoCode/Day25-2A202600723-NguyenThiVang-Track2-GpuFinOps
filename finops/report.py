@@ -3,7 +3,8 @@ from __future__ import annotations
 
 
 def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
-                 sustainability: dict | None = None, period: str = "monthly") -> str:
+                 sustainability: dict | None = None, period: str = "monthly",
+                 unit_econ: dict | None = None, extensions: dict | None = None) -> str:
     """Return a markdown cost-optimization report."""
     savings = baseline_usd - optimized_usd
     pct = (savings / baseline_usd * 100.0) if baseline_usd > 0 else 0.0
@@ -14,6 +15,18 @@ def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
         f"**Baseline spend:** ${baseline_usd:,.0f}  ",
         f"**Optimized spend:** ${optimized_usd:,.0f}  ",
         f"**Projected savings:** ${savings:,.0f}  (**{pct:.0f}%**)",
+    ]
+    if unit_econ:
+        lines += [
+            "",
+            "## Unit economics ($/1M-token)",
+            "",
+            "| | $/1M-token |",
+            "|---|---|",
+            f"| Baseline (all-large, no cache/batch) | ${unit_econ.get('baseline_per_m', 0):.3f} |",
+            f"| Optimized (cascade + cache + batch)  | ${unit_econ.get('optimized_per_m', 0):.3f} |",
+        ]
+    lines += [
         "",
         "## Savings by lever",
         "",
@@ -22,6 +35,9 @@ def build_report(baseline_usd: float, optimized_usd: float, levers: dict,
     ]
     for name, amount in levers.items():
         lines.append(f"| {name} | ${amount:,.0f} |")
+    if extensions:
+        lines += ["", "## Your-Turn extensions (implemented + measured)", ""]
+        lines += extensions.get("lines", [])
     if sustainability:
         lines += [
             "",

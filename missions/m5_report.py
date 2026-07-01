@@ -52,7 +52,33 @@ def run(verbose: bool = True) -> dict:
         "best_region": min(sustainability.REGION_CARBON, key=sustainability.REGION_CARBON.get),
     }
 
-    md = report.build_report(baseline, optimized, levers, sustainability=sust)
+    # --- Your-Turn extensions: surface the measured results in the deliverable ---
+    reason = r2["reasoning"]
+    ext_lines = [
+        "**#1 Interruption-aware tier policy** — weighs per-GPU eviction rate and the "
+        f"3yr-vs-1yr discount. Improves purchasing savings from {r3['simple_savings_pct']}% "
+        f"(simple duty-cycle rule) to {r3['savings_pct']}% "
+        f"(**+${r3['simple_monthly'] - r3['optimized_monthly']:,.0f}/mo**); it moves the "
+        "always-on H100 training fleet from spot to 3yr reserved once rework is priced in.",
+        "",
+        "**#3 Cache economics gate** — `cache_is_worth_it()` requires the cached prompt to "
+        f"be re-read enough to beat the write surcharge; {r2['cache_skipped']} request(s) were "
+        "denied cache credit this run (correctly, not free savings).",
+        "",
+        "**#4 Reasoning energy budget** — `is_reasoning` traffic is "
+        f"{reason['reasoning_share_pct']}% of requests but "
+        f"**{reason['wh_reasoning_share_pct']}% of energy** "
+        f"({reason['wh_reasoning']:.0f}/{reason['wh_total']:.0f} Wh/day). A routing rule "
+        f"that keeps only the top {reason['cap_frac']:.0%} of reasoning queries saves "
+        f"**{reason['wh_saved']:.0f} Wh/day** ({reason['wh_saved_pct']}%), "
+        f"{reason['carbon_g_saved']:.0f} gCO2/day, ${reason['energy_usd_saved']:.2f}/day electricity.",
+    ]
+
+    md = report.build_report(
+        baseline, optimized, levers, sustainability=sust,
+        unit_econ={"baseline_per_m": r2["baseline_per_m"], "optimized_per_m": r2["optimized_per_m"]},
+        extensions={"lines": ext_lines},
+    )
     out_md = os.path.join(ROOT, "outputs", "report.md")
     os.makedirs(os.path.dirname(out_md), exist_ok=True)
     with open(out_md, "w") as f:
